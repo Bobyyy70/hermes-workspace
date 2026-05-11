@@ -16,7 +16,11 @@ WORKDIR /app
 
 # Install deps (cache-friendly: copy only manifests first)
 COPY package.json pnpm-lock.yaml* ./
-RUN pnpm install --frozen-lockfile
+# pnpm v11 blocks dependency postinstall scripts unless an explicit build policy
+# is configured. The Workspace Docker build needs native/bundler packages such
+# as esbuild and unrs-resolver to run their install scripts, so opt in inside
+# the isolated container build before installing dependencies.
+RUN pnpm config set dangerouslyAllowAllBuilds true && pnpm install --frozen-lockfile
 
 # Copy sources and build
 COPY . .
