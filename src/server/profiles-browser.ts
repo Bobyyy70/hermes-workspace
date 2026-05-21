@@ -10,6 +10,7 @@ export type ProfileSummary = {
   exists: boolean
   model?: string
   provider?: string
+  description?: string
   skillCount: number
   sessionCount: number
   hasEnv: boolean
@@ -21,6 +22,7 @@ export type ProfileDetail = {
   path: string
   active: boolean
   config: Record<string, unknown>
+  description: string
   envPath?: string
   hasEnv: boolean
   sessionsDir?: string
@@ -62,6 +64,10 @@ export function getProfilesRoot(): string {
 
 function getActiveProfilePath(): string {
   return path.join(getClaudeRoot(), 'active_profile')
+}
+
+function stickyActiveProfileEnabled(): boolean {
+  return process.env.HERMES_WORKSPACE_STICKY_PROFILE !== '0'
 }
 
 /**
@@ -149,6 +155,19 @@ function latestMtime(paths: Array<string>): string | undefined {
   return latest > 0 ? new Date(latest).toISOString() : undefined
 }
 
+function extractDescription(config: Record<string, unknown>): string {
+  const direct = config.description
+  if (typeof direct === 'string') return direct.trim()
+
+  const metadata = config.metadata
+  if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
+    const nested = (metadata as Record<string, unknown>).description
+    if (typeof nested === 'string') return nested.trim()
+  }
+
+  return ''
+}
+
 export function getActiveProfileName(): string {
   const activePath = getActiveProfilePath()
   if (!fs.existsSync(activePath)) return 'default'
@@ -175,6 +194,7 @@ export function listProfiles(): Array<ProfileSummary> {
 
     for (const entry of entries) {
       const name = entry.name
+      if (name === 'default') continue
       const profilePath = path.join(profilesRoot, name)
       if (!entry.isDirectory()) {
         if (!entry.isSymbolicLink()) continue
@@ -220,6 +240,7 @@ export function listProfiles(): Array<ProfileSummary> {
         exists: true,
         model: modelName,
         provider: providerName,
+        description: extractDescription(config) || undefined,
         skillCount,
         sessionCount,
         hasEnv: fs.existsSync(envPath),
@@ -260,6 +281,7 @@ export function listProfiles(): Array<ProfileSummary> {
     exists: true,
     model: defaultModel,
     provider: defaultProvider,
+    description: extractDescription(config) || undefined,
     skillCount: countFilesRecursive(
       path.join(root, 'skills'),
       (full) => path.basename(full) === 'SKILL.md',
@@ -291,11 +313,13 @@ export function readProfile(name: string): ProfileDetail {
   const envPath = path.join(profilePath, '.env')
   const sessionsDir = path.join(profilePath, 'sessions')
   const skillsDir = path.join(profilePath, 'skills')
+  const config = readYamlConfig(configPath)
   return {
     name: normalized,
     path: profilePath,
     active: normalized === active,
-    config: readYamlConfig(configPath),
+    config,
+    description: extractDescription(config),
     envPath: fs.existsSync(envPath) ? envPath : undefined,
     hasEnv: fs.existsSync(envPath),
     sessionsDir: fs.existsSync(sessionsDir) ? sessionsDir : undefined,
@@ -308,15 +332,19 @@ export function setActiveProfile(name: string): void {
   if (!trimmed) throw new Error('Profile name is required')
   // "default" means clear the active_profile file (revert to default)
   if (trimmed === 'default') {
-    const activePath = getActiveProfilePath()
-    if (fs.existsSync(activePath)) fs.unlinkSync(activePath)
+    if (stickyActiveProfileEnabled()) {
+      const activePath = getActiveProfilePath()
+      if (fs.existsSync(activePath)) fs.unlinkSync(activePath)
+    }
     return
   }
   const normalized = validateProfileName(trimmed)
   const profilePath = path.join(getProfilesRoot(), normalized)
   if (!fs.existsSync(profilePath)) throw new Error('Profile not found')
-  fs.mkdirSync(getClaudeRoot(), { recursive: true })
-  fs.writeFileSync(getActiveProfilePath(), `${normalized}\n`, 'utf-8')
+  if (stickyActiveProfileEnabled()) {
+    fs.mkdirSync(getClaudeRoot(), { recursive: true })
+    fs.writeFileSync(getActiveProfilePath(), `${normalized}\n`, 'utf-8')
+  }
   console.warn(
     `[profiles] Active profile set to "${normalized}". Restart the Hermes Agent gateway for this profile switch to take effect.`,
   )
@@ -445,7 +473,7 @@ export function renameProfile(oldName: string, newName: string): ProfileDetail {
   if (!fs.existsSync(fromPath)) throw new Error('Profile not found')
   if (fs.existsSync(toPath)) throw new Error('Target profile already exists')
   fs.renameSync(fromPath, toPath)
-  if (getActiveProfileName() === from) {
+  if (stickyActiveProfileEnabled() && getActiveProfileName() === from) {
     fs.writeFileSync(getActiveProfilePath(), `${to}\n`, 'utf-8')
   }
   return readProfile(to)
